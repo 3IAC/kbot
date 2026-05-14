@@ -1,5 +1,6 @@
 @echo off
-title KBOT — Kalshi Trading Bot
+chcp 65001 >nul
+title KBOT - Kalshi Trading Bot
 color 0A
 
 echo.

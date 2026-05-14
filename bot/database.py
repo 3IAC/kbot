@@ -1,5 +1,6 @@
 import sqlite3
 import os
+import sys
 import threading
 from datetime import datetime, timezone
 from bot.config import DB_PATH, DATABASE_URL, PAPER_STARTING_BALANCE
@@ -281,4 +282,8 @@ def log_error(module: str, message: str):
         f"INSERT INTO errors (module, message, timestamp) VALUES ({ph},{ph},{ph})",
         (module, str(message)[:2000], _now())
     )
-    print(f"[ERROR] {module}: {message}")
+    try:
+        print(f"[ERROR] {module}: {message}")
+    except UnicodeEncodeError:
+        safe = str(message).encode(sys.stdout.encoding or "ascii", errors="replace").decode(sys.stdout.encoding or "ascii")
+        print(f"[ERROR] {module}: {safe}")

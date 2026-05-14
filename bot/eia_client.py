@@ -16,7 +16,7 @@ def _get(path: str, params: dict = None) -> dict | None:
         r = requests.get(EIA_BASE + path, params=p, timeout=15)
         if r.status_code == 200:
             return r.json()
-        db.log_error("eia_client", f"GET {path} → {r.status_code}: {r.text[:200]}")
+        db.log_error("eia_client", f"GET {path} -> {r.status_code}: {r.text[:200]}")
     except Exception as e:
         db.log_error("eia_client", f"GET {path} exception: {e}")
     return None

@@ -48,7 +48,7 @@ def _get(path: str, params: dict = None) -> dict | None:
         r = requests.get(KALSHI_BASE_URL + path, headers=headers, params=params, timeout=15)
         if r.status_code == 200:
             return r.json()
-        db.log_error("kalshi_client", f"GET {path} → {r.status_code}: {r.text[:300]}")
+        db.log_error("kalshi_client", f"GET {path} -> {r.status_code}: {r.text[:300]}")
         return None
     except Exception as e:
         db.log_error("kalshi_client", f"GET {path} exception: {e}")
@@ -63,7 +63,7 @@ def _post(path: str, body: dict) -> dict | None:
         r = requests.post(KALSHI_BASE_URL + path, headers=headers, json=body, timeout=15)
         if r.status_code in (200, 201):
             return r.json()
-        db.log_error("kalshi_client", f"POST {path} → {r.status_code}: {r.text[:300]}")
+        db.log_error("kalshi_client", f"POST {path} -> {r.status_code}: {r.text[:300]}")
         return None
     except Exception as e:
         db.log_error("kalshi_client", f"POST {path} exception: {e}")

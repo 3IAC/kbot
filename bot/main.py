@@ -9,6 +9,14 @@ import signal
 import threading
 from datetime import datetime, timezone
 
+# Force UTF-8 output on Windows so Unicode characters in logs never crash the bot
+if sys.stdout and hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.executors.pool import ThreadPoolExecutor
 
