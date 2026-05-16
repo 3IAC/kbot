@@ -127,6 +127,57 @@ def get_gdp_growth() -> dict | None:
     }
 
 
+def get_fed_rate() -> dict | None:
+    """Fed funds target upper rate (DFEDTARU), daily."""
+    history = get_series_history("DFEDTARU", 6)
+    if not history:
+        # Fallback: effective fed funds rate
+        history = get_series_history("FEDFUNDS", 6)
+    if not history:
+        return None
+    latest = history[0]
+    return {
+        "series": "DFEDTARU",
+        "name": "Fed Funds Rate Upper Bound",
+        "latest": latest,
+        "trend": _trend_direction(history),
+    }
+
+
+def get_economic_data() -> dict | None:
+    """
+    Consolidated snapshot of key economic indicators for the scanner.
+    Returns dict with: cpi_yoy, cpi_mom, unemployment, gdp_growth, fed_rate
+    """
+    result = {}
+    try:
+        cpi = get_cpi()
+        if cpi:
+            result["cpi_yoy"] = cpi.get("yoy_change")
+            result["cpi_mom"] = cpi.get("mom_change")
+    except Exception:
+        pass
+    try:
+        unemp = get_unemployment()
+        if unemp:
+            result["unemployment"] = unemp.get("latest")
+    except Exception:
+        pass
+    try:
+        gdp = get_gdp_growth()
+        if gdp:
+            result["gdp_growth"] = gdp.get("latest")
+    except Exception:
+        pass
+    try:
+        fed = get_fed_rate()
+        if fed:
+            result["fed_rate"] = fed.get("latest")
+    except Exception:
+        pass
+    return result if result else None
+
+
 def model_econ_prob(indicator: str, threshold: float, direction: str = "above") -> float | None:
     """
     Simple threshold probability model for economic indicators.

@@ -1,456 +1,371 @@
+"""
+scanner.py — Kalshi market scanner using series-ticker targeting.
+
+Instead of keyword-matching market titles (which returns sports parlays),
+we directly query known financial/economic series and parse thresholds from
+the ticker format: KXBTC-26MAY1700-T89799.99  =>  threshold = 89799.99, above
+                   KXBTC-26MAY1700-B89750      =>  threshold = 89750, bracket/band
+"""
 import re
+import math
 import time
 from datetime import datetime, timezone
 
 import bot.database as db
 import bot.kalshi_client as kalshi
-import bot.noaa_client as noaa
 import bot.binance_client as binance
 import bot.fred_client as fred
 import bot.eia_client as eia
 from bot.risk import check_edge, validate_market
+from bot.config import MIN_OPEN_INTEREST
 
 
 def _now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
-# ── Weather scanner ───────────────────────────────────────────────────
+# ── Ticker threshold parser ───────────────────────────────────────────
 
-def _parse_weather_market(market: dict) -> dict | None:
-    """Try to extract city name and weather type from a Kalshi market title."""
-    title = (market.get("title") or "").lower()
-    ticker = (market.get("ticker") or "")
-
-    city_match = None
-    for city in noaa.US_CITIES:
-        if city["name"].lower() in title:
-            city_match = city
-            break
-
-    if not city_match:
-        for part in ["weather", "rain", "temperature", "precip", "snow", "storm"]:
-            if part in title:
-                city_match = noaa.US_CITIES[0]
-                break
-
-    return {"city": city_match, "title": market.get("title", ""), "ticker": ticker} if city_match else None
-
-
-def scan_weather() -> list[dict]:
-    opportunities = []
-    try:
-        markets = kalshi.get_markets(limit=200, status="open")
-        weather_markets = [
-            m for m in markets
-            if any(kw in (m.get("title","") + m.get("ticker","")).lower()
-                   for kw in ["rain", "precip", "temperature", "weather", "snow", "storm", "high temp", "low temp"])
-        ]
-
-        for market in weather_markets[:20]:
-            try:
-                ok, reason = validate_market(market)
-                ticker = market.get("ticker","")
-                title = market.get("title","")
-
-                info = _parse_weather_market(market)
-                if not info or not info["city"]:
-                    db.log_opportunity({
-                        "market_id": ticker, "title": title, "category": "WEATHER",
-                        "direction": "yes", "status": "skipped",
-                        "reason_skipped": "No city matched", "scanned_at": _now_iso()
-                    })
-                    continue
-
-                if not ok:
-                    db.log_opportunity({
-                        "market_id": ticker, "title": title, "category": "WEATHER",
-                        "direction": "yes", "status": "skipped",
-                        "reason_skipped": reason, "scanned_at": _now_iso()
-                    })
-                    continue
-
-                kalshi_implied = kalshi.get_implied_prob(ticker, "yes")
-                if kalshi_implied is None:
-                    continue
-
-                city = info["city"]
-                our_prob = noaa.get_rain_prob(city["name"])
-                if our_prob is None:
-                    data = noaa.get_city_weather(city)
-                    our_prob = data["precip_prob"] / 100.0 if data else None
-                if our_prob is None:
-                    continue
-
-                edge, qualifies = check_edge(our_prob, kalshi_implied)
-                direction = "yes"
-
-                if not qualifies:
-                    inverted_edge, inv_qualifies = check_edge(1 - our_prob, 1 - kalshi_implied)
-                    if inv_qualifies:
-                        edge = inverted_edge
-                        qualifies = True
-                        direction = "no"
-                        our_prob = 1 - our_prob
-
-                status = "opportunity" if qualifies else "scanned"
-                reason = "" if qualifies else f"Edge {edge:.1%} below threshold"
-
-                opp = {
-                    "market_id": ticker, "title": title, "category": "WEATHER",
-                    "direction": direction, "edge_score": edge,
-                    "our_prob": round(our_prob, 4), "kalshi_implied": round(kalshi_implied, 4),
-                    "status": status, "reason_skipped": reason, "scanned_at": _now_iso(),
-                    "open_interest": market.get("open_interest", 0),
-                    "close_time": market.get("close_time",""),
-                }
-                db.log_opportunity(opp)
-                if qualifies:
-                    opportunities.append(opp)
-
-                time.sleep(0.3)
-            except Exception as e:
-                db.log_error("scanner.weather", f"Market {market.get('ticker','')} error: {e}")
-
-    except Exception as e:
-        db.log_error("scanner.weather", f"Weather scan failed: {e}")
-
-    return opportunities
-
-
-# ── Crypto scanner ────────────────────────────────────────────────────
-
-def _parse_crypto_threshold(title: str) -> tuple[str, float, str] | None:
-    """Extract symbol, threshold price, direction from market title."""
-    title_lower = title.lower()
-    symbol = None
-    if "bitcoin" in title_lower or "btc" in title_lower:
-        symbol = "BTCUSDT"
-    elif "ethereum" in title_lower or "eth" in title_lower:
-        symbol = "ETHUSDT"
-    if not symbol:
-        return None
-
-    numbers = re.findall(r"[\$]?([\d,]+(?:\.\d+)?)[kK]?", title)
-    threshold = None
-    for n in numbers:
+def _parse_ticker_threshold(ticker: str) -> tuple[float, str] | None:
+    """
+    Parse threshold and direction from Kalshi ticker suffix.
+      -T89799.99  => (89799.99, "above")   "above threshold"
+      -T-0.3      => (-0.3,     "above")   "above -0.3 (i.e. less negative)"
+      -B89750     => (89750,    "band")    bracket/range market — skip for now
+    Returns (threshold, direction) or None if unparseable.
+    """
+    # Match -T followed by optional minus and digits
+    m = re.search(r'-T(-?[\d]+\.?[\d]*)$', ticker)
+    if m:
         try:
-            val = float(n.replace(",", ""))
-            if "k" in title[title.lower().find(n):title.lower().find(n)+10].lower():
-                val *= 1000
-            if 1000 < val < 500000:
-                threshold = val
-                break
+            return float(m.group(1)), "above"
         except Exception:
             pass
-    if not threshold:
+    # Band market (B prefix = between two prices) — skip
+    m = re.search(r'-B(-?[\d]+\.?[\d]*)$', ticker)
+    if m:
+        return None  # band markets not yet supported
+    return None
+
+
+def _log_skip(ticker, title, category, reason):
+    db.log_opportunity({
+        "market_id": ticker, "title": title, "category": category,
+        "direction": "yes", "status": "skipped",
+        "reason_skipped": reason, "scanned_at": _now_iso(),
+    })
+
+
+def _log_scanned(ticker, title, category, direction, edge, our_prob,
+                 kalshi_implied, oi, close_time, qualifies):
+    status = "opportunity" if qualifies else "scanned"
+    reason = "" if qualifies else f"Edge {edge:.1%} below threshold"
+    return {
+        "market_id": ticker, "title": title, "category": category,
+        "direction": direction, "edge_score": edge,
+        "our_prob": round(our_prob, 4),
+        "kalshi_implied": round(kalshi_implied, 4),
+        "status": status, "reason_skipped": reason,
+        "scanned_at": _now_iso(),
+        "open_interest": oi,
+        "close_time": close_time,
+    }
+
+
+def _process_market(market: dict, category: str, our_prob_fn) -> dict | None:
+    """
+    Generic market processor. our_prob_fn(threshold, direction) -> float|None.
+    Returns opportunity dict if qualifies, else None.
+    Logs everything to DB regardless.
+    """
+    ticker = market.get("ticker", "")
+    title = market.get("title", "") or ticker
+    close_time = market.get("close_time", "")
+    oi = kalshi.market_open_interest(market)
+
+    # Validate basic market criteria
+    ok, reason = validate_market(market)
+    if not ok:
+        _log_skip(ticker, title, category, reason)
         return None
 
-    direction = "above"
-    if any(w in title_lower for w in ["below", "under", "less than", "drop"]):
-        direction = "below"
+    # Need actual bid/ask to compute implied prob
+    if not kalshi.market_has_quotes(market):
+        _log_skip(ticker, title, category, "No bid/ask quotes — illiquid")
+        return None
 
-    return symbol, threshold, direction
+    # Parse threshold from ticker
+    parsed = _parse_ticker_threshold(ticker)
+    if not parsed:
+        _log_skip(ticker, title, category, "Non-standard ticker format (band/unknown)")
+        return None
+    threshold, direction = parsed
 
+    # Compute our model probability
+    our_prob = our_prob_fn(threshold, direction)
+    if our_prob is None:
+        _log_skip(ticker, title, category, "Model data unavailable")
+        return None
+
+    # Get market-implied probability
+    kalshi_implied = kalshi.market_mid_price(market)
+    if kalshi_implied is None:
+        _log_skip(ticker, title, category, "Cannot compute market implied prob")
+        return None
+
+    # Check edge
+    edge, qualifies = check_edge(our_prob, kalshi_implied)
+
+    # Also try the inverse: bet NO if we think it won't happen
+    if not qualifies:
+        inv_edge, inv_q = check_edge(1 - our_prob, 1 - kalshi_implied)
+        if inv_q:
+            edge, qualifies = inv_edge, True
+            our_prob = 1 - our_prob
+            direction = "no"
+        else:
+            direction = "yes"
+
+    bet_dir = "yes" if direction != "no" else "no"
+    opp = _log_scanned(ticker, title, category, bet_dir, edge, our_prob,
+                       kalshi_implied, oi, close_time, qualifies)
+    db.log_opportunity(opp)
+    return opp if qualifies else None
+
+
+# ── Probability models ────────────────────────────────────────────────
+
+def _crypto_prob_btc(threshold: float, direction: str) -> float | None:
+    """
+    Estimate P(BTC > threshold at expiry) using current price and a
+    simple log-normal model with 5% annualised daily vol (short-dated).
+    """
+    price = binance.get_price("BTCUSDT")
+    if price is None:
+        return None
+    return _price_above_prob(price, threshold, direction, daily_vol_pct=0.04)
+
+
+def _crypto_prob_eth(threshold: float, direction: str) -> float | None:
+    price = binance.get_price("ETHUSDT")
+    if price is None:
+        return None
+    return _price_above_prob(price, threshold, direction, daily_vol_pct=0.055)
+
+
+def _price_above_prob(current: float, threshold: float, direction: str,
+                      daily_vol_pct: float = 0.04) -> float:
+    """
+    P(price > threshold) assuming log-normal price with given daily vol.
+    Uses complementary CDF of the standard normal.
+    For very short-dated markets (< 3 days), assume ~current price.
+    """
+    if current <= 0 or threshold <= 0:
+        return 0.5
+    log_ratio = math.log(threshold / current)
+    # Sigma ~ daily_vol; assume 1-day horizon
+    sigma = daily_vol_pct
+    # z-score: how many sigmas above current is the threshold?
+    z = log_ratio / sigma  # positive = threshold above current
+    # P(price > threshold) = P(Z < -z) using standard normal CDF approx
+    prob_above = _norm_cdf(-z)
+    if direction == "above":
+        return max(0.01, min(0.99, prob_above))
+    else:  # below
+        return max(0.01, min(0.99, 1.0 - prob_above))
+
+
+def _norm_cdf(x: float) -> float:
+    """Approximation of the standard normal CDF."""
+    # Abramowitz & Stegun approximation
+    if x < 0:
+        return 1.0 - _norm_cdf(-x)
+    k = 1.0 / (1.0 + 0.2316419 * x)
+    poly = k * (0.319381530 + k * (-0.356563782 + k * (1.781477937 +
+                k * (-1.821255978 + k * 1.330274429))))
+    return 1.0 - (1.0 / math.sqrt(2 * math.pi)) * math.exp(-0.5 * x * x) * poly
+
+
+def _cpi_prob(threshold: float, direction: str) -> float | None:
+    """
+    Compare FRED CPI month-over-month change to KXCPI threshold.
+    KXCPI threshold is the monthly % change (e.g., 0.3 means +0.3% MoM).
+    Uses cpi_mom directly; falls back to cpi_yoy / 12 if needed.
+    """
+    data = fred.get_economic_data()
+    if not data:
+        return None
+    # Prefer direct MoM figure
+    cpi_mom = data.get("cpi_mom")
+    if cpi_mom is None:
+        cpi_yoy = data.get("cpi_yoy")
+        if cpi_yoy is None:
+            return None
+        cpi_mom = cpi_yoy / 12.0
+    # Uncertainty: ±0.15pp (monthly CPI is noisy)
+    return _value_above_prob(cpi_mom, threshold, direction, uncertainty=0.15)
+
+
+def _fed_prob(threshold: float, direction: str) -> float | None:
+    """
+    KXFED threshold is fed funds rate upper bound (e.g., 4.25).
+    Use FRED fed rate data.
+    """
+    data = fred.get_economic_data()
+    if not data:
+        return None
+    fed_rate = data.get("fed_rate")
+    if fed_rate is None:
+        return None
+    return _value_above_prob(fed_rate, threshold, direction, uncertainty=0.25)
+
+
+def _gdp_prob(threshold: float, direction: str) -> float | None:
+    """
+    KXGDP threshold is quarterly GDP growth % (e.g., 4.0 = 4.0% annualized).
+    Use FRED GDP data.
+    """
+    data = fred.get_economic_data()
+    if not data:
+        return None
+    gdp = data.get("gdp_growth")
+    if gdp is None:
+        return None
+    return _value_above_prob(gdp, threshold, direction, uncertainty=1.0)
+
+
+def _wti_prob(threshold: float, direction: str) -> float | None:
+    """
+    KXWTI threshold is WTI crude oil price in USD/bbl.
+    Fetches current WTI spot price from EIA and builds a log-normal model.
+    """
+    wti = eia.get_wti_price()
+    if wti and wti > 0:
+        return _price_above_prob(wti, threshold, direction, daily_vol_pct=0.025)
+    return None
+
+
+def _value_above_prob(current: float, threshold: float, direction: str,
+                      uncertainty: float = 0.5) -> float:
+    """
+    P(value > threshold) using a logistic function around the current value.
+    uncertainty = 1-sigma uncertainty in the current value.
+    """
+    if uncertainty <= 0:
+        return 1.0 if current > threshold else 0.0
+    z = (current - threshold) / uncertainty
+    # Logistic function as CDF approximation
+    prob = 1.0 / (1.0 + math.exp(-z * 1.7))  # 1.7 scales logistic to ~normal
+    if direction == "above":
+        return max(0.01, min(0.99, prob))
+    else:
+        return max(0.01, min(0.99, 1.0 - prob))
+
+
+# ── Category scanners ─────────────────────────────────────────────────
 
 def scan_crypto() -> list[dict]:
+    """Scan KXBTC and KXETH series for price-range opportunities."""
     opportunities = []
-    try:
-        markets = kalshi.get_markets(limit=200, status="open")
-        crypto_markets = [
-            m for m in markets
-            if any(kw in (m.get("title","") + m.get("ticker","")).lower()
-                   for kw in ["bitcoin", "btc", "ethereum", "eth", "crypto"])
-        ]
+    print("[SCANNER] Crypto: fetching KXBTC / KXETH markets...")
 
-        for market in crypto_markets[:20]:
-            try:
-                ok, reason = validate_market(market)
-                ticker = market.get("ticker","")
-                title = market.get("title","")
+    series_map = {
+        "KXBTC": _crypto_prob_btc,
+        "KXETH": _crypto_prob_eth,
+    }
 
-                parsed = _parse_crypto_threshold(title)
-                if not parsed:
-                    db.log_opportunity({
-                        "market_id": ticker, "title": title, "category": "CRYPTO",
-                        "direction": "yes", "status": "skipped",
-                        "reason_skipped": "No threshold parsed", "scanned_at": _now_iso()
-                    })
-                    continue
-
-                if not ok:
-                    db.log_opportunity({
-                        "market_id": ticker, "title": title, "category": "CRYPTO",
-                        "direction": "yes", "status": "skipped",
-                        "reason_skipped": reason, "scanned_at": _now_iso()
-                    })
-                    continue
-
-                symbol, threshold, direction = parsed
-                our_prob = binance.model_threshold_prob(symbol, threshold, direction)
-                if our_prob is None:
-                    continue
-
-                kalshi_implied = kalshi.get_implied_prob(ticker, "yes")
-                if kalshi_implied is None:
-                    continue
-
-                if direction == "no":
-                    edge, qualifies = check_edge(our_prob, 1 - kalshi_implied)
-                else:
-                    edge, qualifies = check_edge(our_prob, kalshi_implied)
-
-                bet_direction = "yes" if direction == "above" else "no"
-                status = "opportunity" if qualifies else "scanned"
-                skip_reason = "" if qualifies else f"Edge {edge:.1%} below threshold"
-
-                opp = {
-                    "market_id": ticker, "title": title, "category": "CRYPTO",
-                    "direction": bet_direction, "edge_score": edge,
-                    "our_prob": round(our_prob, 4), "kalshi_implied": round(kalshi_implied, 4),
-                    "status": status, "reason_skipped": skip_reason, "scanned_at": _now_iso(),
-                    "open_interest": market.get("open_interest", 0),
-                    "close_time": market.get("close_time",""),
-                }
-                db.log_opportunity(opp)
-                if qualifies:
+    for series, prob_fn in series_map.items():
+        try:
+            markets = kalshi.get_markets(limit=200, series_ticker=series, status="open")
+            print(f"[SCANNER] {series}: {len(markets)} markets")
+            liquid = [m for m in markets if kalshi.market_has_quotes(m)]
+            print(f"[SCANNER] {series}: {len(liquid)} with bid/ask quotes")
+            for market in liquid[:30]:
+                opp = _process_market(market, "CRYPTO", prob_fn)
+                if opp:
                     opportunities.append(opp)
-
-                time.sleep(0.2)
-            except Exception as e:
-                db.log_error("scanner.crypto", f"Market {market.get('ticker','')} error: {e}")
-
-    except Exception as e:
-        db.log_error("scanner.crypto", f"Crypto scan failed: {e}")
+                time.sleep(0.3)
+        except Exception as e:
+            db.log_error("scanner.crypto", f"{series} error: {e}")
+        time.sleep(0.5)
 
     return opportunities
-
-
-# ── Economic scanner ──────────────────────────────────────────────────
-
-_ECON_KEYWORDS = ["cpi", "inflation", "unemployment", "gdp", "federal funds", "fed rate", "jobs", "payroll"]
-_ECON_SERIES_MAP = {
-    "cpi": ("cpi_yoy", None),
-    "inflation": ("cpi_yoy", None),
-    "unemployment": ("unemployment", None),
-    "jobs": ("unemployment", None),
-    "gdp": ("gdp_growth", None),
-}
-
-
-def _parse_econ_market(title: str) -> tuple[str, float, str] | None:
-    title_lower = title.lower()
-    indicator = None
-    for kw, (series, _) in _ECON_SERIES_MAP.items():
-        if kw in title_lower:
-            indicator = series
-            break
-    if not indicator:
-        return None
-
-    numbers = re.findall(r"([\d]+\.?[\d]*)\s*%?", title)
-    threshold = None
-    for n in numbers:
-        try:
-            val = float(n)
-            if 0 < val < 100:
-                threshold = val
-                break
-        except Exception:
-            pass
-    if not threshold:
-        return None
-
-    direction = "above"
-    if any(w in title_lower for w in ["below", "under", "less than", "fall"]):
-        direction = "below"
-
-    return indicator, threshold, direction
 
 
 def scan_economic() -> list[dict]:
+    """Scan KXCPI, KXFED, KXGDP for economic threshold opportunities."""
     opportunities = []
-    try:
-        markets = kalshi.get_markets(limit=200, status="open")
-        econ_markets = [
-            m for m in markets
-            if any(kw in (m.get("title","") + m.get("ticker","")).lower()
-                   for kw in _ECON_KEYWORDS)
-        ]
+    print("[SCANNER] Economic: fetching KXCPI / KXFED / KXGDP markets...")
 
-        for market in econ_markets[:20]:
-            try:
-                ok, reason = validate_market(market)
-                ticker = market.get("ticker","")
-                title = market.get("title","")
+    series_map = {
+        "KXCPI": _cpi_prob,
+        "KXFED": _fed_prob,
+        "KXGDP": _gdp_prob,
+    }
 
-                parsed = _parse_econ_market(title)
-                if not parsed:
-                    db.log_opportunity({
-                        "market_id": ticker, "title": title, "category": "ECONOMIC",
-                        "direction": "yes", "status": "skipped",
-                        "reason_skipped": "No indicator/threshold parsed", "scanned_at": _now_iso()
-                    })
-                    continue
-
-                if not ok:
-                    db.log_opportunity({
-                        "market_id": ticker, "title": title, "category": "ECONOMIC",
-                        "direction": "yes", "status": "skipped",
-                        "reason_skipped": reason, "scanned_at": _now_iso()
-                    })
-                    continue
-
-                indicator, threshold, direction = parsed
-                our_prob = fred.model_econ_prob(indicator, threshold, direction)
-                if our_prob is None:
-                    db.log_opportunity({
-                        "market_id": ticker, "title": title, "category": "ECONOMIC",
-                        "direction": "yes", "status": "skipped",
-                        "reason_skipped": "FRED data unavailable (check FRED_API_KEY)", "scanned_at": _now_iso()
-                    })
-                    continue
-
-                kalshi_implied = kalshi.get_implied_prob(ticker, "yes")
-                if kalshi_implied is None:
-                    continue
-
-                edge, qualifies = check_edge(our_prob, kalshi_implied)
-                status = "opportunity" if qualifies else "scanned"
-                skip_reason = "" if qualifies else f"Edge {edge:.1%} below threshold"
-
-                opp = {
-                    "market_id": ticker, "title": title, "category": "ECONOMIC",
-                    "direction": "yes", "edge_score": edge,
-                    "our_prob": round(our_prob, 4), "kalshi_implied": round(kalshi_implied, 4),
-                    "status": status, "reason_skipped": skip_reason, "scanned_at": _now_iso(),
-                    "open_interest": market.get("open_interest", 0),
-                    "close_time": market.get("close_time",""),
-                }
-                db.log_opportunity(opp)
-                if qualifies:
+    for series, prob_fn in series_map.items():
+        try:
+            markets = kalshi.get_markets(limit=100, series_ticker=series, status="open")
+            print(f"[SCANNER] {series}: {len(markets)} markets")
+            liquid = [m for m in markets if kalshi.market_has_quotes(m)]
+            print(f"[SCANNER] {series}: {len(liquid)} with bid/ask quotes")
+            for market in liquid[:20]:
+                opp = _process_market(market, "ECONOMIC", prob_fn)
+                if opp:
                     opportunities.append(opp)
-
-                time.sleep(0.2)
-            except Exception as e:
-                db.log_error("scanner.economic", f"Market {market.get('ticker','')} error: {e}")
-
-    except Exception as e:
-        db.log_error("scanner.economic", f"Economic scan failed: {e}")
+                time.sleep(0.3)
+        except Exception as e:
+            db.log_error("scanner.economic", f"{series} error: {e}")
+        time.sleep(0.5)
 
     return opportunities
 
 
-# ── Energy scanner ────────────────────────────────────────────────────
-
-_ENERGY_KEYWORDS = ["gas price", "gasoline", "crude oil", "petroleum", "energy", "oil inventory", "barrel"]
-
-
-def _parse_energy_market(title: str) -> tuple[str, float, str] | None:
-    title_lower = title.lower()
-    if any(kw in title_lower for kw in ["gas", "gasoline"]):
-        indicator = "gas_price"
-    elif any(kw in title_lower for kw in ["crude", "oil", "barrel", "inventory"]):
-        indicator = "crude_inventory"
-    else:
-        return None
-
-    numbers = re.findall(r"\$?([\d]+\.?[\d]*)", title)
-    threshold = None
-    for n in numbers:
-        try:
-            val = float(n)
-            if indicator == "gas_price" and 1 < val < 20:
-                threshold = val
-                break
-            elif indicator == "crude_inventory" and val > 100:
-                threshold = val
-                break
-        except Exception:
-            pass
-    if not threshold:
-        return None
-
-    direction = "above"
-    if any(w in title_lower for w in ["below", "under", "less than", "drop", "fall"]):
-        direction = "below"
-
-    return indicator, threshold, direction
-
-
 def scan_energy() -> list[dict]:
+    """Scan KXWTI crude oil markets."""
     opportunities = []
+    print("[SCANNER] Energy: fetching KXWTI markets...")
+
     try:
-        markets = kalshi.get_markets(limit=200, status="open")
-        energy_markets = [
-            m for m in markets
-            if any(kw in (m.get("title","") + m.get("ticker","")).lower()
-                   for kw in _ENERGY_KEYWORDS)
-        ]
-
-        for market in energy_markets[:20]:
-            try:
-                ok, reason = validate_market(market)
-                ticker = market.get("ticker","")
-                title = market.get("title","")
-
-                parsed = _parse_energy_market(title)
-                if not parsed:
-                    db.log_opportunity({
-                        "market_id": ticker, "title": title, "category": "ENERGY",
-                        "direction": "yes", "status": "skipped",
-                        "reason_skipped": "No energy threshold parsed", "scanned_at": _now_iso()
-                    })
-                    continue
-
-                if not ok:
-                    db.log_opportunity({
-                        "market_id": ticker, "title": title, "category": "ENERGY",
-                        "direction": "yes", "status": "skipped",
-                        "reason_skipped": reason, "scanned_at": _now_iso()
-                    })
-                    continue
-
-                indicator, threshold, direction = parsed
-                if indicator == "gas_price":
-                    our_prob = eia.model_gas_price_prob(threshold, direction)
-                else:
-                    our_prob = eia.model_crude_inventory_prob(threshold, direction)
-
-                if our_prob is None:
-                    db.log_opportunity({
-                        "market_id": ticker, "title": title, "category": "ENERGY",
-                        "direction": "yes", "status": "skipped",
-                        "reason_skipped": "EIA data unavailable (check EIA_API_KEY)", "scanned_at": _now_iso()
-                    })
-                    continue
-
-                kalshi_implied = kalshi.get_implied_prob(ticker, "yes")
-                if kalshi_implied is None:
-                    continue
-
-                edge, qualifies = check_edge(our_prob, kalshi_implied)
-                status = "opportunity" if qualifies else "scanned"
-                skip_reason = "" if qualifies else f"Edge {edge:.1%} below threshold"
-
-                opp = {
-                    "market_id": ticker, "title": title, "category": "ENERGY",
-                    "direction": "yes", "edge_score": edge,
-                    "our_prob": round(our_prob, 4), "kalshi_implied": round(kalshi_implied, 4),
-                    "status": status, "reason_skipped": skip_reason, "scanned_at": _now_iso(),
-                    "open_interest": market.get("open_interest", 0),
-                    "close_time": market.get("close_time",""),
-                }
-                db.log_opportunity(opp)
-                if qualifies:
-                    opportunities.append(opp)
-
-                time.sleep(0.2)
-            except Exception as e:
-                db.log_error("scanner.energy", f"Market {market.get('ticker','')} error: {e}")
-
+        markets = kalshi.get_markets(limit=100, series_ticker="KXWTI", status="open")
+        print(f"[SCANNER] KXWTI: {len(markets)} markets")
+        liquid = [m for m in markets if kalshi.market_has_quotes(m)]
+        print(f"[SCANNER] KXWTI: {len(liquid)} with bid/ask quotes")
+        for market in liquid[:20]:
+            opp = _process_market(market, "ENERGY", _wti_prob)
+            if opp:
+                opportunities.append(opp)
+            time.sleep(0.3)
     except Exception as e:
-        db.log_error("scanner.energy", f"Energy scan failed: {e}")
+        db.log_error("scanner.energy", f"KXWTI error: {e}")
+
+    return opportunities
+
+
+def scan_weather() -> list[dict]:
+    """
+    Weather markets (NOAA-based). Currently no active Kalshi weather series
+    with near-term price ranges was found. Scan returns 0 until a valid series
+    appears. Extend series list below as Kalshi adds new weather markets.
+    """
+    opportunities = []
+    WEATHER_SERIES = []  # Add e.g. "KXTEMP", "KXRAIN" when Kalshi activates them
+    print(f"[SCANNER] Weather: {len(WEATHER_SERIES)} active series configured")
+
+    for series in WEATHER_SERIES:
+        try:
+            markets = kalshi.get_markets(limit=50, series_ticker=series, status="open")
+            liquid = [m for m in markets if kalshi.market_has_quotes(m)]
+            for market in liquid[:10]:
+                # Simple model: 50/50 with slight skew toward NOAA precip forecast
+                def _weather_prob(threshold, direction):
+                    return 0.5  # placeholder until NOAA model integrated
+                opp = _process_market(market, "WEATHER", _weather_prob)
+                if opp:
+                    opportunities.append(opp)
+                time.sleep(0.3)
+        except Exception as e:
+            db.log_error("scanner.weather", f"{series} error: {e}")
 
     return opportunities
 
@@ -463,10 +378,10 @@ def run_full_scan() -> list[dict]:
     all_opportunities = []
 
     for label, fn in [
-        ("WEATHER", scan_weather),
-        ("CRYPTO", scan_crypto),
+        ("CRYPTO",   scan_crypto),
         ("ECONOMIC", scan_economic),
-        ("ENERGY", scan_energy),
+        ("ENERGY",   scan_energy),
+        ("WEATHER",  scan_weather),
     ]:
         try:
             opps = fn()

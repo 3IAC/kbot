@@ -102,6 +102,40 @@ def get_crude_inventory() -> dict | None:
     return None
 
 
+def get_wti_price() -> float | None:
+    """
+    Latest WTI crude oil spot price (USD/bbl) from EIA petroleum spot prices.
+    Falls back to estimation from gas price if spot price unavailable.
+    """
+    data = _get("/petroleum/pri/spt/data/", {
+        "frequency": "daily",
+        "data[0]": "value",
+        "facets[series][]": "RWTC",
+        "sort[0][column]": "period",
+        "sort[0][direction]": "desc",
+        "length": 5,
+    })
+    if data:
+        response = data.get("response") or data
+        records = response.get("data", []) if isinstance(response, dict) else []
+        for rec in records:
+            try:
+                v = float(rec.get("value", 0))
+                if v > 0:
+                    return v
+            except Exception:
+                pass
+
+    # Fallback: estimate from retail gas price
+    # Gas retail = WTI/42 * (refining margin ~1.3) + taxes/markup
+    gas = get_gas_prices()
+    if gas and gas.get("latest"):
+        # Rough: gas = 0.6 + WTI*0.031; solve: WTI = (gas - 0.6) / 0.031
+        wti_est = max(30.0, (gas["latest"] - 0.60) / 0.031)
+        return round(wti_est, 2)
+    return None
+
+
 def _trend_direction(history: list[float]) -> float:
     if len(history) < 2:
         return 0.0

@@ -36,9 +36,18 @@ def can_trade() -> tuple[bool, str]:
 
 
 def validate_market(market: dict) -> tuple[bool, str]:
-    oi = market.get("open_interest", 0) or 0
+    # Support both new API (open_interest_fp string) and legacy (open_interest int)
+    oi_fp = market.get("open_interest_fp")
+    if oi_fp is not None:
+        try:
+            oi = float(oi_fp)
+        except Exception:
+            oi = 0.0
+    else:
+        oi = float(market.get("open_interest", 0) or 0)
+
     if oi < MIN_OPEN_INTEREST:
-        return False, f"Open interest {oi} < {MIN_OPEN_INTEREST}"
+        return False, f"Open interest {oi:.0f} < {MIN_OPEN_INTEREST}"
 
     expiry_str = market.get("close_time") or market.get("expiration_time") or ""
     if expiry_str:

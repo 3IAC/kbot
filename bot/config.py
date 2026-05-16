@@ -9,7 +9,7 @@ KALSHI_KEY_ID = os.getenv("KALSHI_KEY_ID", "")
 KALSHI_PRIVATE_KEY_PATH = os.getenv("KALSHI_PRIVATE_KEY_PATH", "./private_key.pem")
 
 if KALSHI_ENV == "live":
-    KALSHI_BASE_URL = "https://trading-api.kalshi.com/trade-api/v2"
+    KALSHI_BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
 else:
     KALSHI_BASE_URL = "https://demo-api.kalshi.co/trade-api/v2"
 
