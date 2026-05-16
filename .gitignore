@@ -6,6 +6,8 @@ private_key.pem
 
 # Database
 *.db
+*.db-shm
+*.db-wal
 *.sqlite
 *.sqlite3
 
