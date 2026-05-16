@@ -5,6 +5,7 @@ import requests
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.backends import default_backend
+import os
 from bot.config import KALSHI_BASE_URL, KALSHI_KEY_ID, KALSHI_PRIVATE_KEY_PATH
 import bot.database as db
 
@@ -16,6 +17,13 @@ def _load_key():
     if _private_key is not None:
         return _private_key
     try:
+        # Railway/cloud: key content passed as env var KALSHI_PRIVATE_KEY
+        pem_content = os.environ.get("KALSHI_PRIVATE_KEY", "").strip()
+        if pem_content:
+            pem_bytes = pem_content.replace("\\n", "\n").encode("utf-8")
+            _private_key = serialization.load_pem_private_key(pem_bytes, password=None, backend=default_backend())
+            return _private_key
+        # Local: load from file
         with open(KALSHI_PRIVATE_KEY_PATH, "rb") as f:
             _private_key = serialization.load_pem_private_key(f.read(), password=None, backend=default_backend())
         return _private_key
