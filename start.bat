@@ -52,7 +52,7 @@ echo.
 
 :: Watchdog loop — restarts bot if it crashes
 :loop
-python bot/main.py
+python -m bot.main
 if errorlevel 1 (
     echo.
     echo [WATCHDOG] Bot exited with error. Restarting in 10 seconds...
