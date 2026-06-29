@@ -4,6 +4,7 @@ Runs scanner every 30 minutes and exit monitor every 10 minutes.
 Zero user prompts. All errors logged silently.
 """
 import sys
+import os
 import time
 import signal
 import threading
@@ -67,8 +68,9 @@ def start_dashboard():
     """Start Flask dashboard in a background thread."""
     try:
         from dashboard.app import app
-        print(f"[KBOT] Dashboard starting on http://localhost:{DASHBOARD_PORT}")
-        app.run(host="0.0.0.0", port=DASHBOARD_PORT, debug=False, use_reloader=False)
+        port = int(os.environ.get("PORT", DASHBOARD_PORT))
+        print(f"[KBOT] Dashboard starting on port {port}")
+        app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
     except Exception as e:
         db.log_error("main.dashboard", f"Dashboard failed to start: {e}")
 
