@@ -17,7 +17,7 @@ import bot.binance_client as binance
 import bot.fred_client as fred
 import bot.eia_client as eia
 from bot.risk import check_edge, validate_market
-from bot.config import MIN_OPEN_INTEREST
+from bot.config import MIN_OPEN_INTEREST, MIN_HOURS_TO_EXPIRY, MAX_HOURS_TO_EXPIRY
 
 
 def _now_iso():
@@ -88,6 +88,20 @@ def _process_market(market: dict, category: str, our_prob_fn) -> dict | None:
     if not ok:
         _log_skip(ticker, title, category, reason)
         return None
+
+    # Enforce expiry window: must be between MIN and MAX hours from now
+    if close_time:
+        try:
+            close_dt = datetime.fromisoformat(close_time.replace("Z", "+00:00"))
+            hours_left = (close_dt - datetime.now(timezone.utc)).total_seconds() / 3600
+            if hours_left < MIN_HOURS_TO_EXPIRY:
+                _log_skip(ticker, title, category, f"Expires too soon ({hours_left:.1f}h < {MIN_HOURS_TO_EXPIRY}h min)")
+                return None
+            if hours_left > MAX_HOURS_TO_EXPIRY:
+                _log_skip(ticker, title, category, f"Expires too far out ({hours_left:.1f}h > {MAX_HOURS_TO_EXPIRY}h max)")
+                return None
+        except Exception:
+            pass
 
     # Need actual bid/ask to compute implied prob
     if not kalshi.market_has_quotes(market):
@@ -370,6 +384,53 @@ def scan_weather() -> list[dict]:
     return opportunities
 
 
+def scan_soccer() -> list[dict]:
+    """
+    Scan FIFA / World Cup / Soccer markets by title keyword search.
+    Uses a simple 50/50 model with slight confidence adjustment based on
+    the Kalshi implied probability — no external data source needed.
+    """
+    opportunities = []
+    SOCCER_KEYWORDS = ["FIFA", "World Cup", "SOCCER", "FOOTBALL"]
+    print("[SCANNER] Soccer: searching FIFA/World Cup/Soccer markets...")
+
+    seen = set()
+    for keyword in SOCCER_KEYWORDS:
+        try:
+            markets = kalshi.get_markets(limit=100, search=keyword, status="open")
+            print(f"[SCANNER] Soccer '{keyword}': {len(markets)} markets")
+            for market in markets:
+                ticker = market.get("ticker", "")
+                if ticker in seen:
+                    continue
+                seen.add(ticker)
+                title = (market.get("title", "") or ticker).lower()
+                # Double-check the title actually relates to soccer/football
+                if not any(kw.lower() in title for kw in SOCCER_KEYWORDS):
+                    continue
+                liquid = kalshi.market_has_quotes(market)
+                if not liquid:
+                    continue
+                # For binary soccer outcomes (win/lose/draw) use a flat model:
+                # our probability = market implied ± small adjustment to find edge
+                def _soccer_prob(threshold, direction, _market=market):
+                    implied = kalshi.market_mid_price(_market)
+                    if implied is None:
+                        return None
+                    # Slight fade toward 50/50 to find mispriced markets
+                    return max(0.05, min(0.95, implied * 0.9 + 0.05))
+                opp = _process_market(market, "SOCCER", _soccer_prob)
+                if opp:
+                    opportunities.append(opp)
+                time.sleep(0.2)
+        except Exception as e:
+            db.log_error("scanner.soccer", f"'{keyword}' error: {e}")
+        time.sleep(0.3)
+
+    print(f"[SCANNER] Soccer: {len(opportunities)} opportunities found")
+    return opportunities
+
+
 # ── Main scan ─────────────────────────────────────────────────────────
 
 def run_full_scan() -> list[dict]:
@@ -382,6 +443,7 @@ def run_full_scan() -> list[dict]:
         ("ECONOMIC", scan_economic),
         ("ENERGY",   scan_energy),
         ("WEATHER",  scan_weather),
+        ("SOCCER",   scan_soccer),
     ]:
         try:
             opps = fn()
@@ -390,6 +452,16 @@ def run_full_scan() -> list[dict]:
         except Exception as e:
             db.log_error("scanner", f"{label} scan error: {e}")
 
-    all_opportunities.sort(key=lambda x: x.get("edge_score", 0), reverse=True)
+    # Sort by soonest expiry first (fast payouts), break ties by edge score
+    def _sort_key(x):
+        close_time = x.get("close_time", "")
+        try:
+            close_dt = datetime.fromisoformat(close_time.replace("Z", "+00:00"))
+            hours_left = (close_dt - datetime.now(timezone.utc)).total_seconds() / 3600
+        except Exception:
+            hours_left = 999
+        return (hours_left, -x.get("edge_score", 0))
+
+    all_opportunities.sort(key=_sort_key)
     print(f"[SCANNER] Scan complete — {len(all_opportunities)} total opportunities")
     return all_opportunities

@@ -32,7 +32,8 @@ FEE_BUFFER = 0.03         # 3% kalshi taker fee buffer
 BET_PCT = 0.03            # 3% of balance per trade
 MAX_OPEN_POSITIONS = 5
 MIN_OPEN_INTEREST = 500
-MIN_HOURS_TO_EXPIRY = 2
+MIN_HOURS_TO_EXPIRY = 1
+MAX_HOURS_TO_EXPIRY = 48
 
 # ── Scheduler intervals ───────────────────────────────────────────────
 SCAN_INTERVAL_MINUTES = 30
