@@ -95,10 +95,13 @@ def _process_market(market: dict, category: str, our_prob_fn) -> dict | None:
             close_dt = datetime.fromisoformat(close_time.replace("Z", "+00:00"))
             hours_left = (close_dt - datetime.now(timezone.utc)).total_seconds() / 3600
             if hours_left < MIN_HOURS_TO_EXPIRY:
-                _log_skip(ticker, title, category, f"Expires too soon ({hours_left:.1f}h < {MIN_HOURS_TO_EXPIRY}h min)")
+                reason = f"Expires too soon ({hours_left:.1f}h < {MIN_HOURS_TO_EXPIRY}h min)"
+                print(f"[SCANNER] SKIP {ticker}: {reason}")
+                _log_skip(ticker, title, category, reason)
                 return None
             if hours_left > MAX_HOURS_TO_EXPIRY:
-                _log_skip(ticker, title, category, f"Expires too far out ({hours_left:.1f}h > {MAX_HOURS_TO_EXPIRY}h max)")
+                reason = f"Expires too far out ({hours_left:.1f}h > {MAX_HOURS_TO_EXPIRY}h max — need contracts expiring within 48h)"
+                _log_skip(ticker, title, category, reason)
                 return None
         except Exception:
             pass
@@ -293,12 +296,13 @@ def scan_crypto() -> list[dict]:
             markets = kalshi.get_markets(limit=200, series_ticker=series, status="open")
             print(f"[SCANNER] {series}: {len(markets)} markets")
             liquid = [m for m in markets if kalshi.market_has_quotes(m)]
-            print(f"[SCANNER] {series}: {len(liquid)} with bid/ask quotes")
+            print(f"[SCANNER] {series}: {len(liquid)} with bid/ask quotes (48h max filter active)")
             for market in liquid[:30]:
                 opp = _process_market(market, "CRYPTO", prob_fn)
                 if opp:
                     opportunities.append(opp)
                 time.sleep(0.3)
+            print(f"[SCANNER] {series}: {len(opportunities)} passed 48h window so far")
         except Exception as e:
             db.log_error("scanner.crypto", f"{series} error: {e}")
         time.sleep(0.5)
@@ -397,19 +401,14 @@ def scan_soccer() -> list[dict]:
     seen = set()
     for keyword in SOCCER_KEYWORDS:
         try:
-            markets = kalshi.get_markets(limit=100, search=keyword, status="open")
+            markets = kalshi.get_markets_by_category(keyword)
             print(f"[SCANNER] Soccer '{keyword}': {len(markets)} markets")
             for market in markets:
                 ticker = market.get("ticker", "")
                 if ticker in seen:
                     continue
                 seen.add(ticker)
-                title = (market.get("title", "") or ticker).lower()
-                # Double-check the title actually relates to soccer/football
-                if not any(kw.lower() in title for kw in SOCCER_KEYWORDS):
-                    continue
-                liquid = kalshi.market_has_quotes(market)
-                if not liquid:
+                if not kalshi.market_has_quotes(market):
                     continue
                 # For binary soccer outcomes (win/lose/draw) use a flat model:
                 # our probability = market implied ± small adjustment to find edge
