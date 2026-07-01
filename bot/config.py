@@ -27,11 +27,11 @@ DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///kbot.db")
 DB_PATH = os.getenv("DB_PATH", os.path.join(os.path.dirname(os.path.dirname(__file__)), "kbot.db"))
 
 # ── Risk parameters ───────────────────────────────────────────────────
-MIN_EDGE = 0.10           # 10% minimum edge after fees
-FEE_BUFFER = 0.03         # 3% kalshi taker fee buffer
+MIN_EDGE = 0.03           # 3% minimum edge after fees
+FEE_BUFFER = 0.02         # 2% kalshi taker fee buffer
 BET_PCT = 0.03            # 3% of balance per trade
 MAX_OPEN_POSITIONS = 5
-MIN_OPEN_INTEREST = 500
+MIN_OPEN_INTEREST = 50
 MIN_HOURS_TO_EXPIRY = 1
 MAX_HOURS_TO_EXPIRY = 168
 

@@ -142,6 +142,7 @@ def _process_market(market: dict, category: str, our_prob_fn) -> dict | None:
             direction = "no"
         else:
             direction = "yes"
+            print(f"[KBOT] EDGE_FAIL {ticker[:40]}: our={our_prob:.2%} kalshi={kalshi_implied:.2%} edge={edge:.2%}")
 
     bet_dir = "yes" if direction != "no" else "no"
     opp = _log_scanned(ticker, title, category, bet_dir, edge, our_prob,
