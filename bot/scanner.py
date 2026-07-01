@@ -100,7 +100,7 @@ def _process_market(market: dict, category: str, our_prob_fn) -> dict | None:
                 _log_skip(ticker, title, category, reason)
                 return None
             if hours_left > MAX_HOURS_TO_EXPIRY:
-                reason = f"Expires too far out ({hours_left:.1f}h > {MAX_HOURS_TO_EXPIRY}h max — need contracts expiring within 48h)"
+                reason = f"Expires too far out ({hours_left:.1f}h > {MAX_HOURS_TO_EXPIRY}h max)"
                 _log_skip(ticker, title, category, reason)
                 return None
         except Exception:
@@ -297,13 +297,13 @@ def scan_crypto() -> list[dict]:
             markets = kalshi.get_markets(limit=200, series_ticker=series, status="open")
             print(f"[SCANNER] {series}: {len(markets)} markets")
             liquid = [m for m in markets if kalshi.market_has_quotes(m)]
-            print(f"[SCANNER] {series}: {len(liquid)} with bid/ask quotes (48h max filter active)")
-            for market in liquid[:30]:
+            print(f"[SCANNER] {series}: {len(liquid)} with bid/ask quotes ({MIN_HOURS_TO_EXPIRY}h-{MAX_HOURS_TO_EXPIRY}h expiry window)")
+            for market in liquid[:50]:
                 opp = _process_market(market, "CRYPTO", prob_fn)
                 if opp:
                     opportunities.append(opp)
                 time.sleep(0.3)
-            print(f"[SCANNER] {series}: {len(opportunities)} passed 48h window so far")
+            print(f"[SCANNER] {series}: {len(opportunities)} opportunities so far")
         except Exception as e:
             db.log_error("scanner.crypto", f"{series} error: {e}")
         time.sleep(0.5)
