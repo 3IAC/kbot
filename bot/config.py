@@ -33,7 +33,7 @@ BET_PCT = 0.03            # 3% of balance per trade
 MAX_OPEN_POSITIONS = 5
 MIN_OPEN_INTEREST = 500
 MIN_HOURS_TO_EXPIRY = 1
-MAX_HOURS_TO_EXPIRY = 48
+MAX_HOURS_TO_EXPIRY = 168
 
 # ── Scheduler intervals ───────────────────────────────────────────────
 SCAN_INTERVAL_MINUTES = 30
