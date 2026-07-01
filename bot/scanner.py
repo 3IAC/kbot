@@ -296,10 +296,12 @@ def scan_crypto() -> list[dict]:
 
     for series, prob_fn in series_map.items():
         try:
-            markets = kalshi.get_markets(limit=200, series_ticker=series, status="open")
-            print(f"[SCANNER] {series}: {len(markets)} markets")
-            liquid = [m for m in markets if kalshi.market_has_quotes(m)]
-            print(f"[SCANNER] {series}: {len(liquid)} with bid/ask quotes ({MIN_HOURS_TO_EXPIRY}h-{MAX_HOURS_TO_EXPIRY}h expiry window)")
+            markets = kalshi.get_markets_paged(series, limit_per_page=200)
+            print(f"[SCANNER] {series}: {len(markets)} markets total")
+            # Prioritise -T (above-threshold) markets; band (-B) are unsupported
+            threshold_markets = [m for m in markets if '-T' in (m.get('ticker') or '')]
+            liquid = [m for m in threshold_markets if kalshi.market_has_quotes(m)]
+            print(f"[SCANNER] {series}: {len(threshold_markets)} threshold (-T), {len(liquid)} with quotes")
             for market in liquid[:50]:
                 opp = _process_market(market, "CRYPTO", prob_fn)
                 if opp:
