@@ -86,6 +86,7 @@ def _process_market(market: dict, category: str, our_prob_fn) -> dict | None:
     # Validate basic market criteria
     ok, reason = validate_market(market)
     if not ok:
+        print(f"[SCANNER] SKIP {ticker[:40]}: {reason}")
         _log_skip(ticker, title, category, reason)
         return None
 
@@ -114,6 +115,7 @@ def _process_market(market: dict, category: str, our_prob_fn) -> dict | None:
     # Parse threshold from ticker
     parsed = _parse_ticker_threshold(ticker)
     if not parsed:
+        print(f"[SCANNER] SKIP {ticker[:40]}: non-standard ticker format")
         _log_skip(ticker, title, category, "Non-standard ticker format (band/unknown)")
         return None
     threshold, direction = parsed
