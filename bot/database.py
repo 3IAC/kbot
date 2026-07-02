@@ -32,6 +32,22 @@ def _ph():
     return "%s" if _is_postgres() else "?"
 
 
+def reset_paper_state():
+    """Wipe paper account + open positions back to starting state."""
+    ph = _ph()
+    _execute("DELETE FROM open_positions")
+    _execute("DELETE FROM paper_account")
+    now = _now()
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        f"INSERT INTO paper_account (id, balance, total_pnl, total_trades, win_count, halted, updated_at) VALUES (1, {ph}, 0.0, 0, 0, 0, {ph})",
+        (PAPER_STARTING_BALANCE, now)
+    )
+    conn.commit()
+    print(f"[DB] Paper state reset — balance=${PAPER_STARTING_BALANCE:.2f}, positions cleared")
+
+
 def init_db():
     ph = _ph()
     conn = get_conn()
@@ -113,6 +129,11 @@ def init_db():
     """)
 
     conn.commit()
+
+    # Force reset if env var set (set RESET_DB=true in Railway, then remove it)
+    if os.getenv("RESET_DB", "").lower() == "true":
+        reset_paper_state()
+        return
 
     row = _fetchone("SELECT id FROM paper_account WHERE id = 1")
     if row is None:
