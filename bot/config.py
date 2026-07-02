@@ -16,7 +16,7 @@ else:
 # ── Paper trading ─────────────────────────────────────────────────────
 PAPER_TRADING = os.getenv("PAPER_TRADING", "true").lower() == "true"
 PAPER_STARTING_BALANCE = float(os.getenv("PAPER_STARTING_BALANCE", "100.00"))
-PAPER_KILL_SWITCH_BALANCE = float(os.getenv("PAPER_KILL_SWITCH_BALANCE", "70.00"))
+PAPER_KILL_SWITCH_BALANCE = float(os.getenv("PAPER_KILL_SWITCH_BALANCE", "50.00"))
 
 # ── External APIs ─────────────────────────────────────────────────────
 FRED_API_KEY = os.getenv("FRED_API_KEY", "")
@@ -27,13 +27,13 @@ DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///kbot.db")
 DB_PATH = os.getenv("DB_PATH", os.path.join(os.path.dirname(os.path.dirname(__file__)), "kbot.db"))
 
 # ── Risk parameters ───────────────────────────────────────────────────
-MIN_EDGE = -0.50          # disabled for paper testing — accept any market
-FEE_BUFFER = 0.00         # no fee buffer for paper testing
+MIN_EDGE = 0.05           # 5% minimum edge after fees
+FEE_BUFFER = 0.01         # 1% fee buffer
 BET_PCT = 0.03            # 3% of balance per trade
 MAX_OPEN_POSITIONS = 5
-MIN_OPEN_INTEREST = 0     # no OI filter for paper testing
-MIN_HOURS_TO_EXPIRY = 1
-MAX_HOURS_TO_EXPIRY = 168
+MIN_OPEN_INTEREST = 0     # demo markets have no OI — keep at 0
+MIN_HOURS_TO_EXPIRY = 0.5 # 30-min minimum (fast resolving bets)
+MAX_HOURS_TO_EXPIRY = 24  # 24h max — only today's contracts
 
 # ── Scheduler intervals ───────────────────────────────────────────────
 SCAN_INTERVAL_MINUTES = 30

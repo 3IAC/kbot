@@ -50,6 +50,19 @@ def _settle_paper_position(pos: dict, exit_price: float, exit_reason: str):
     db.update_balance(new_balance, pnl_delta=pnl, trade_won=won)
 
     print(f"[EXIT] {pos['market_id']} | {outcome.upper()} | P&L: ${pnl:+.2f} | reason: {exit_reason}")
+
+    # Learning log: report streak for this category+direction
+    cat = pos.get("category", "")
+    direction = pos.get("direction", "yes")
+    streak = db.get_loss_streak(cat, direction)
+    if streak >= 2:
+        print(f"[LEARN] {cat}/{direction.upper()} has {streak} consecutive losses — will skip next scan")
+    elif outcome == "win":
+        recent = db.get_recent_closed_trades(10)
+        cat_trades = [t for t in recent if t["category"] == cat and t["direction"] == direction]
+        wins = sum(1 for t in cat_trades if t["outcome"] == "win")
+        print(f"[LEARN] {cat}/{direction.upper()} win rate: {wins}/{len(cat_trades)} recent trades")
+
     check_kill_switch()
 
 

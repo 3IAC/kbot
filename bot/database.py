@@ -265,6 +265,39 @@ def get_recent_opportunities(limit=100):
     )
 
 
+def get_recent_closed_trades(limit=20):
+    return _fetchall(
+        f"SELECT * FROM trades ORDER BY exit_time DESC LIMIT {_ph()}", (limit,)
+    )
+
+
+def get_loss_streak(category: str, direction: str) -> int:
+    """Count consecutive losses for a category+direction (most recent first)."""
+    trades = _fetchall(
+        f"SELECT outcome FROM trades WHERE category={_ph()} AND direction={_ph()} ORDER BY exit_time DESC LIMIT 5",
+        (category, direction)
+    )
+    streak = 0
+    for t in trades:
+        if t["outcome"] == "loss":
+            streak += 1
+        else:
+            break
+    return streak
+
+
+def get_avoid_patterns(min_streak: int = 3) -> set:
+    """Return set of (category, direction) tuples with >= min_streak consecutive losses."""
+    avoid = set()
+    pairs = _fetchall(
+        "SELECT DISTINCT category, direction FROM trades"
+    )
+    for p in pairs:
+        if get_loss_streak(p["category"], p["direction"]) >= min_streak:
+            avoid.add((p["category"], p["direction"]))
+    return avoid
+
+
 def get_markets_scanned_today():
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     row = _fetchone(

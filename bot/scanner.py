@@ -132,21 +132,28 @@ def _process_market(market: dict, category: str, our_prob_fn) -> dict | None:
         _log_skip(ticker, title, category, "Cannot compute market implied prob")
         return None
 
-    # Check edge
-    edge, qualifies = check_edge(our_prob, kalshi_implied)
+    # Always evaluate both YES and NO, pick whichever side has better edge
+    yes_edge, yes_q = check_edge(our_prob, kalshi_implied)
+    no_edge, no_q = check_edge(1 - our_prob, 1 - kalshi_implied)
 
-    # Also try the inverse: bet NO if we think it won't happen
-    if not qualifies:
-        inv_edge, inv_q = check_edge(1 - our_prob, 1 - kalshi_implied)
-        if inv_q:
-            edge, qualifies = inv_edge, True
+    if yes_q and no_q:
+        # Both sides qualify — pick the higher edge
+        if no_edge > yes_edge:
+            edge, qualifies, direction = no_edge, True, "no"
             our_prob = 1 - our_prob
-            direction = "no"
         else:
-            direction = "yes"
-            print(f"[KBOT] EDGE_FAIL {ticker[:40]}: our={our_prob:.2%} kalshi={kalshi_implied:.2%} edge={edge:.2%}")
+            edge, qualifies, direction = yes_edge, True, "yes"
+    elif yes_q:
+        edge, qualifies, direction = yes_edge, True, "yes"
+    elif no_q:
+        edge, qualifies, direction = no_edge, True, "no"
+        our_prob = 1 - our_prob
+    else:
+        edge, qualifies = max(yes_edge, no_edge), False
+        direction = "yes" if yes_edge >= no_edge else "no"
+        print(f"[KBOT] EDGE_FAIL {ticker[:40]}: our={our_prob:.2%} kalshi={kalshi_implied:.2%} yes_edge={yes_edge:.2%} no_edge={no_edge:.2%}")
 
-    bet_dir = "yes" if direction != "no" else "no"
+    bet_dir = direction
     opp = _log_scanned(ticker, title, category, bet_dir, edge, our_prob,
                        kalshi_implied, oi, close_time, qualifies)
     db.log_opportunity(opp)
@@ -440,6 +447,12 @@ def scan_soccer() -> list[dict]:
 def run_full_scan() -> list[dict]:
     """Run all 4 category scans. Returns list of actionable opportunities."""
     print(f"[SCANNER] Starting full scan at {_now_iso()}")
+
+    # Load losing patterns to skip this cycle
+    avoid_patterns = db.get_avoid_patterns(min_streak=3)
+    if avoid_patterns:
+        print(f"[SCANNER] Avoiding {len(avoid_patterns)} loss-streak patterns: {avoid_patterns}")
+
     all_opportunities = []
 
     for label, fn in [
@@ -455,6 +468,17 @@ def run_full_scan() -> list[dict]:
             all_opportunities.extend(opps)
         except Exception as e:
             db.log_error("scanner", f"{label} scan error: {e}")
+
+    # Filter out patterns with >= 3 consecutive losses
+    if avoid_patterns:
+        before = len(all_opportunities)
+        all_opportunities = [
+            o for o in all_opportunities
+            if (o.get("category",""), o.get("direction","")) not in avoid_patterns
+        ]
+        skipped = before - len(all_opportunities)
+        if skipped:
+            print(f"[SCANNER] Skipped {skipped} opportunities due to loss streaks")
 
     # Sort by soonest expiry first (fast payouts), break ties by edge score
     def _sort_key(x):
